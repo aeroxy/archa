@@ -6,6 +6,15 @@ description = "Local-first Agent session reader and explorer with an embedded we
 authors = ["Aero <aero.windwalker@gmail.com>"]
 repository = "https://github.com/aeroxy/archa"
 license = "MIT"
+include = [
+    "src/**/*",
+    "frontend/dist/**/*",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "build.rs",
+    "Makefile"
+]
 
 [dependencies]
 # Async runtime

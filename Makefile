@@ -32,6 +32,9 @@ dev-frontend:
 dev-backend:
 	cargo run
 
+publish: build
+	cargo publish --allow-dirty
+
 bump-patch:
 	@old=$$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'); \
 	major=$$(echo $$old | cut -d. -f1); \
