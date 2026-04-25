@@ -1,0 +1,53 @@
+.layout {
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: 250px;
+  border-right: 1px solid #ccc;
+  padding: 1rem;
+  overflow-y: auto;
+  background-color: #f9f9f9;
+}
+
+.sidebar-sessions {
+  width: 250px;
+  border-right: 1px solid #ccc;
+  padding: 1rem;
+  overflow-y: auto;
+  background-color: #fff;
+}
+
+.content {
+  flex: 1;
+  padding: 1rem;
+  overflow-y: auto;
+  background-color: #fff;
+}
+
+button {
+  display: block;
+  width: 100%;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #eaeaea;
+}
+
+button.active {
+  background: #e0e0e0;
+  font-weight: bold;
+}
+
+pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
