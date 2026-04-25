@@ -25,6 +25,12 @@
 
 ## Installation
 
+### Via Homebrew (macOS)
+
+```bash
+brew install aeroxy/tap/archa
+```
+
 ### From Source
 
 ```bash
@@ -41,10 +47,22 @@ make build
 Simply run the binary:
 
 ```bash
-./target/release/archa
+archa
 ```
 
-Archa will scan your `.claude` directory and start a web server. The URL (e.g., `http://127.0.0.1:3000`) will be printed to your terminal.
+### Options
+
+```bash
+archa --help
+
+# Usage: archa [OPTIONS]
+#
+# Options:
+#   -p, --port <PORT>                 Port to listen on [default: 3000]
+#   -P, --projects-path <PROJECTS_PATH>  Custom path to Claude projects
+#   -h, --help                        Print help
+#   -V, --version                     Print version
+```
 
 ## Development
 

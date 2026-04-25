@@ -7,6 +7,19 @@ use std::fs;
 use std::path::{Path as StdPath, PathBuf};
 use tokio::net::TcpListener;
 use std::time::SystemTime;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Port to listen on
+    #[arg(short, long, default_value_t = 3000)]
+    port: u16,
+
+    /// Custom path to Claude projects
+    #[arg(short, long)]
+    projects_path: Option<PathBuf>,
+}
 
 #[derive(Embed)]
 #[folder = "frontend/dist/"]
@@ -29,6 +42,7 @@ struct Session {
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
     tracing_subscriber::fmt::init();
 
     let app = Router::new()
@@ -39,14 +53,14 @@ async fn main() {
         .fallback(static_handler)
         .layer(CorsLayer::permissive());
 
-    let mut port = 3000;
+    let mut port = args.port;
     let listener = loop {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         match TcpListener::bind(addr).await {
             Ok(listener) => break listener,
             Err(_) => {
                 port += 1;
-                if port > 4000 {
+                if port > args.port + 1000 {
                     panic!("Could not find an available port");
                 }
             }

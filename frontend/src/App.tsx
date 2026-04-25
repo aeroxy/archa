@@ -218,7 +218,7 @@ function App() {
           </div>
         </div>
         <div className="p-4 border-t border-outline-variant bg-surface-container-low text-center">
-          <p className="text-[10px] text-outline uppercase tracking-wider">Archa v0.1.0 • CLI Session Chronicle</p>
+          <p className="text-[10px] text-outline uppercase tracking-wider">Archa v0.1.1 • CLI Session Chronicle</p>
         </div>
       </section>
     </div>
