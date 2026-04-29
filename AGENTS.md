@@ -17,6 +17,8 @@ Archa aims to turn AI interactions into a searchable, readable, and preservable 
   - Three-column layout (Switcher, Explorer, Reader).
   - Uses `react-markdown` with `remark-gfm` for high-fidelity rendering.
   - Custom typography system (Inter for UI, Newsreader for Content, Space Grotesk for Code).
+  - Renders `ContentBlock[]` messages: `text`, `thinking` (collapsible `ThinkingWidget`), `tool_use`, and `tool_result` blocks.
+  - Uses `lucide-react` for SVG icons.
 
 ## Key Directories
 
@@ -48,9 +50,16 @@ make run
 - **Style**: Adheres to the "Archa" design system (Academic Precision / Industrial Utility).
 - **Static Assets**: All frontend assets are embedded in the Rust binary during release builds.
 
+## Preparing a new release
+
+1. Bump the version using `make bump-patch`, `make bump-minor` or `make bump-major`.
+2. Build the release binary: `make build`
+3. Zip the binary inside the release folder: `zip -j target/release/archa_macos_arm64.zip target/release/archa`
+4. Calculate the SHA256: `shasum -a 256 target/release/archa_macos_arm64.zip`
+5. Update `Formula/archa.rb` with the new version, URL, and SHA256.
+
 ## Wiki
 
 | Doc | Covers |
 |-----|--------|
-| [wiki/architecture.md](wiki/architecture.md) | Deep dive into how Archa reads Claude data and manages state. |
-| [wiki/design.md](wiki/design.md) | The philosophy behind the UI and typography choices. |
+| [wiki/architecture.md](wiki/architecture.md) | Deep dive into how Archa reads Claude data, manages state, and renders tool calls. |

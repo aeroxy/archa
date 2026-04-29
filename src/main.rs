@@ -1,4 +1,4 @@
-use axum::{routing::get, Router, extract::Path, response::{IntoResponse, Response}, http::{header, StatusCode, Uri}, body::Body};
+use axum::{routing::get, Router, extract::{Path, State}, response::{IntoResponse, Response}, http::{header, StatusCode, Uri}, body::Body};
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use rust_embed::Embed;
@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path as StdPath, PathBuf};
 use tokio::net::TcpListener;
 use std::time::SystemTime;
+use std::sync::Arc;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -17,7 +18,12 @@ struct Args {
     port: u16,
 
     /// Custom path to Claude projects
-    #[arg(short, long)]
+    #[arg(short = 'd', long)]
+    projects_path: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct AppState {
     projects_path: Option<PathBuf>,
 }
 
@@ -40,17 +46,28 @@ struct Session {
     timestamp: Option<String>,
 }
 
+#[derive(Serialize)]
+struct SessionInfo {
+    project_id: String,
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
     tracing_subscriber::fmt::init();
 
+    let state = Arc::new(AppState {
+        projects_path: args.projects_path.clone(),
+    });
+
     let app = Router::new()
-        .route("/api/projects", get(list_projects))
-        .route("/api/sessions/{project_id}", get(list_sessions))
-        .route("/api/session/{project_id}/{session_id}", get(read_session))
-        .route("/api/recent-sessions", get(recent_sessions))
+        .route("/api/{cli}/projects", get(list_projects))
+        .route("/api/{cli}/sessions/{project_id}", get(list_sessions))
+        .route("/api/{cli}/session/{project_id}/{session_id}", get(read_session))
+        .route("/api/{cli}/recent-sessions", get(recent_sessions))
+        .route("/api/{cli}/session-info/{session_id}", get(get_session_project))
         .fallback(static_handler)
+        .with_state(state)
         .layer(CorsLayer::permissive());
 
     let mut port = args.port;
@@ -73,12 +90,22 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-fn get_projects_path() -> PathBuf {
-    home::home_dir().unwrap().join(".claude/projects")
+fn get_cli_path(cli: &str, custom_path: &Option<PathBuf>) -> PathBuf {
+    if let Some(path) = custom_path {
+        return path.clone();
+    }
+    
+    match cli {
+        "opencode" => home::home_dir().unwrap().join(".config/opencode/projects"),
+        _ => home::home_dir().unwrap().join(".claude/projects"), // default to claude
+    }
 }
 
-async fn list_projects() -> axum::Json<Vec<Project>> {
-    let path = get_projects_path();
+async fn list_projects(
+    Path(cli): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> axum::Json<Vec<Project>> {
+    let path = get_cli_path(&cli, &state.projects_path);
     let mut projects = Vec::new();
     
     if let Ok(entries) = fs::read_dir(path) {
@@ -86,16 +113,23 @@ async fn list_projects() -> axum::Json<Vec<Project>> {
             if entry.path().is_dir() {
                 if let Ok(id) = entry.file_name().into_string() {
                     let mut cwd = None;
+                    let mut has_sessions = false;
                     // Try to find the actual cwd from the first session file
                     if let Ok(sessions) = fs::read_dir(entry.path()) {
                         for session in sessions.flatten() {
                             if session.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                                if let Some(found_cwd) = extract_cwd_from_file(&session.path()) {
-                                    cwd = Some(found_cwd);
-                                    break;
+                                has_sessions = true;
+                                if cwd.is_none() {
+                                    if let Some(found_cwd) = extract_cwd_from_file(&session.path()) {
+                                        cwd = Some(found_cwd);
+                                    }
                                 }
                             }
                         }
+                    }
+
+                    if !has_sessions {
+                        continue;
                     }
 
                     let name = cwd.as_ref()
@@ -129,8 +163,11 @@ fn extract_cwd_from_file(path: &StdPath) -> Option<String> {
     None
 }
 
-async fn list_sessions(Path(project_id): Path<String>) -> axum::Json<Vec<Session>> {
-    let path = get_projects_path().join(&project_id);
+async fn list_sessions(
+    Path((cli, project_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> axum::Json<Vec<Session>> {
+    let path = get_cli_path(&cli, &state.projects_path).join(&project_id);
     let mut sessions = Vec::new();
     
     if let Ok(entries) = fs::read_dir(path) {
@@ -152,8 +189,11 @@ async fn list_sessions(Path(project_id): Path<String>) -> axum::Json<Vec<Session
     axum::Json(sessions)
 }
 
-async fn recent_sessions() -> axum::Json<Vec<Session>> {
-    let path = get_projects_path();
+async fn recent_sessions(
+    Path(cli): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> axum::Json<Vec<Session>> {
+    let path = get_cli_path(&cli, &state.projects_path);
     let mut all_sessions = Vec::new();
 
     if let Ok(project_entries) = fs::read_dir(path) {
@@ -190,6 +230,28 @@ async fn recent_sessions() -> axum::Json<Vec<Session>> {
     axum::Json(recent)
 }
 
+async fn get_session_project(
+    Path((cli, session_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let path = get_cli_path(&cli, &state.projects_path);
+    let expected_filename = format!("{}", session_id);
+    
+    if let Ok(project_entries) = fs::read_dir(path) {
+        for project_entry in project_entries.flatten() {
+            if project_entry.path().is_dir() {
+                let project_id = project_entry.file_name().to_string_lossy().into_owned();
+                let possible_file = project_entry.path().join(&expected_filename);
+                if possible_file.exists() || project_entry.path().join(format!("{}.jsonl", session_id)).exists() {
+                    return axum::Json(SessionInfo { project_id }).into_response();
+                }
+            }
+        }
+    }
+    
+    Response::builder().status(StatusCode::NOT_FOUND).body(Body::from("Not Found")).unwrap()
+}
+
 fn get_session_title(path: &std::path::Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     for line in content.lines() {
@@ -214,8 +276,11 @@ fn get_session_title(path: &std::path::Path) -> Option<String> {
     None
 }
 
-async fn read_session(Path((project_id, session_id)): Path<(String, String)>) -> impl IntoResponse {
-    let path = get_projects_path().join(&project_id).join(&session_id);
+async fn read_session(
+    Path((cli, project_id, session_id)): Path<(String, String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let path = get_cli_path(&cli, &state.projects_path).join(&project_id).join(&session_id);
     
     match fs::read_to_string(path) {
         Ok(content) => Response::new(Body::from(content)),

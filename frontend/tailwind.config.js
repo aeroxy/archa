@@ -39,6 +39,7 @@ export default {
         "surface-dim": "#d9d9e5",
         "surface-container-low": "#f3f3fe",
         "error": "#ba1a1a",
+        "success": "#059669",
         "on-secondary": "#ffffff",
         "secondary-container": "#dae2fd",
         "on-tertiary-fixed": "#360f00",

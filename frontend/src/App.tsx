@@ -1,6 +1,22 @@
 import { useState, useEffect, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { ClaudeIcon, OpencodeIcon } from './icons'
+import { clsx, type ClassValue } from 'clsx'
+import { twMerge } from 'tailwind-merge'
+import { 
+  Wrench, 
+  CheckCircle2, 
+  AlertCircle, 
+  ChevronRight, 
+  ChevronDown,
+  Bot,
+  Sparkles
+} from 'lucide-react'
+
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
 
 interface Project {
   id: string;
@@ -14,75 +30,219 @@ interface Session {
   title: string;
 }
 
+type ContentBlock = 
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'tool_use'; id: string; name: string; input: any }
+  | { type: 'tool_result'; tool_use_id: string; content: any; is_error?: boolean };
+
 interface Message {
   role: 'user' | 'assistant' | 'system';
-  content: string;
-  thinking?: string;
+  content: ContentBlock[];
   timestamp: string;
 }
 
 const convertToMessages = (jsonl: string): Message[] => {
-  return jsonl.split('\n')
+  const rawEntries = jsonl.split('\n')
     .filter(line => line.trim())
     .map(line => {
       try {
         const obj = JSON.parse(line);
-        if (obj.type === 'user') {
+        if (obj.type === 'user' || obj.type === 'assistant') {
           const content = obj.message.content;
-          const text = typeof content === 'string' ? content : (Array.isArray(content) ? content.map((c: any) => c.text).join('\n') : '');
-          return { role: 'user', content: text, timestamp: obj.timestamp };
-        } else if (obj.type === 'assistant') {
-          const content = obj.message.content;
-          let text = '';
-          let thinking = '';
-          if (Array.isArray(content)) {
-            text = content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n');
-            thinking = content.filter((c: any) => c.type === 'thinking').map((c: any) => c.thinking).join('\n');
-          } else if (typeof content === 'string') {
-            text = content;
+          let blocks: ContentBlock[] = [];
+          
+          if (typeof content === 'string') {
+            blocks = [{ type: 'text', text: content }];
+          } else if (Array.isArray(content)) {
+            blocks = content.map((c: any) => {
+              if (c.type === 'text') return { type: 'text', text: typeof c.text === 'string' ? c.text : (c.text?.text || JSON.stringify(c.text)) };
+              if (c.type === 'thinking') return { type: 'thinking', thinking: c.thinking, signature: c.signature };
+              if (c.type === 'tool_use') return { type: 'tool_use', id: c.id, name: c.name, input: c.input };
+              if (c.type === 'tool_result') return { type: 'tool_result', tool_use_id: c.tool_use_id, content: c.content, is_error: c.is_error };
+              return { type: 'text', text: JSON.stringify(c) };
+            });
           }
-          return { role: 'assistant', content: text, thinking, timestamp: obj.timestamp };
+          
+          return { 
+            role: obj.type as 'user' | 'assistant' | 'system', 
+            content: blocks, 
+            timestamp: obj.timestamp,
+            msgId: obj.message.id || obj.promptId || obj.uuid 
+          };
         }
         return null;
       } catch (e) {
         return null;
       }
     })
-    .filter((m): m is Message => m !== null);
+    .filter((m): m is any => m !== null);
+
+  // 1. Collect all tool results from the entire session
+  const toolResultsMap = new Map<string, ContentBlock>();
+  rawEntries.forEach(entry => {
+    entry.content.forEach((block: ContentBlock) => {
+      if (block.type === 'tool_result') {
+        toolResultsMap.set(block.tool_use_id, block);
+      }
+    });
+  });
+
+  // 2. Clean entries: remove tool_result from user messages and attach to tool_use in assistant messages
+  rawEntries.forEach(entry => {
+    // Remove tool results from their original user message
+    entry.content = entry.content.filter((block: ContentBlock) => block.type !== 'tool_result');
+    
+    // For assistant messages, find tool_use and append their results if they exist
+    if (entry.role === 'assistant') {
+      const newContent: ContentBlock[] = [];
+      entry.content.forEach((block: ContentBlock) => {
+        newContent.push(block);
+        if (block.type === 'tool_use') {
+          const result = toolResultsMap.get(block.id);
+          if (result) {
+            newContent.push(result);
+          }
+        }
+      });
+      entry.content = newContent;
+    }
+  });
+
+  const merged: Message[] = [];
+  const msgMap = new Map<string, number>();
+
+  for (const entry of rawEntries) {
+    // Skip entries that became empty after moving tool results
+    if (entry.content.length === 0) continue;
+
+    const existingIdx = msgMap.get(entry.msgId);
+    
+    if (existingIdx !== undefined) {
+      const existing = merged[existingIdx];
+      const mergedBlocks = [...existing.content];
+      
+      entry.content.forEach((newBlock: ContentBlock) => {
+        const sameTypeIdx = mergedBlocks.findIndex(b => {
+          if (b.type === 'thinking' && newBlock.type === 'thinking') return true;
+          if (b.type === 'tool_use' && newBlock.type === 'tool_use' && b.id === newBlock.id) return true;
+          if (b.type === 'tool_result' && newBlock.type === 'tool_result' && b.tool_use_id === newBlock.tool_use_id) return true;
+          return false;
+        });
+
+        if (sameTypeIdx !== -1) {
+          mergedBlocks[sameTypeIdx] = newBlock;
+        } else {
+          mergedBlocks.push(newBlock);
+        }
+      });
+      
+      existing.content = mergedBlocks;
+      existing.timestamp = entry.timestamp;
+    } else {
+      msgMap.set(entry.msgId, merged.length);
+      merged.push({
+        role: entry.role,
+        content: entry.content,
+        timestamp: entry.timestamp
+      });
+    }
+  }
+  return merged;
 }
 
 function App() {
+  const [activeCli, setActiveCli] = useState<'claude' | 'opencode'>('claude');
   const [projects, setProjects] = useState<Project[]>([])
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({})
   const [projectSessions, setProjectSessions] = useState<Record<string, Session[]>>({})
-  const [selectedSession, setSelectedSession] = useState<{ project_id: string, id: string } | null>(null)
+  const [selectedSession, setSelectedSession] = useState<{ cli: string, project_id: string, id: string } | null>(null)
   const [conversation, setConversation] = useState<string>('')
   const [recentSessions, setRecentSessions] = useState<Session[]>([])
 
+  // Helper to fetch and expand a project's sessions
+  const expandProject = async (cli: string, projectId: string) => {
+    setExpandedProjects(prev => ({ ...prev, [projectId]: true }));
+    const res = await fetch(`/api/${cli}/sessions/${projectId}`);
+    const data = await res.json();
+    setProjectSessions(prev => ({ ...prev, [projectId]: data }));
+  };
+
+  // Initial load / Browser navigation handler
   useEffect(() => {
-    fetch('/api/projects')
-      .then(res => res.json())
-      .then(data => setProjects(data))
+    const handleLocationChange = async () => {
+      const match = window.location.pathname.match(/^\/([^\/]+)\/([^\/]+)$/);
+      if (match) {
+        const cliParam = match[1] as 'claude' | 'opencode';
+        const sessionId = match[2];
+        
+        if (cliParam === 'claude' || cliParam === 'opencode') {
+          setActiveCli(cliParam);
+          
+          try {
+            // Find which project this session belongs to
+            const infoRes = await fetch(`/api/${cliParam}/session-info/${sessionId}`);
+            if (infoRes.ok) {
+              const { project_id } = await infoRes.json();
+              setSelectedSession({ cli: cliParam, project_id, id: sessionId });
+              expandProject(cliParam, project_id);
+            } else {
+              setSelectedSession(null);
+            }
+          } catch (e) {
+            console.error('Failed to find session info', e);
+            setSelectedSession(null);
+          }
+        }
+      } else {
+        setSelectedSession(null);
+      }
+    };
+
+    handleLocationChange();
+
+    window.addEventListener('popstate', handleLocationChange);
+    return () => window.removeEventListener('popstate', handleLocationChange);
+  }, []);
+
+  // Fetch projects and recent sessions when CLI changes
+  useEffect(() => {
+    setProjects([]);
+    setRecentSessions([]);
+    setExpandedProjects({});
     
-    fetch('/api/recent-sessions')
+    fetch(`/api/${activeCli}/projects`)
       .then(res => res.json())
-      .then(data => setRecentSessions(data))
-  }, [])
+      .then(data => setProjects(data));
+    
+    fetch(`/api/${activeCli}/recent-sessions`)
+      .then(res => res.json())
+      .then(data => setRecentSessions(data));
+  }, [activeCli]);
 
   const toggleProject = async (projectId: string) => {
     const isExpanded = !!expandedProjects[projectId];
-    setExpandedProjects(prev => ({ ...prev, [projectId]: !isExpanded }));
-
-    if (!isExpanded && !projectSessions[projectId]) {
-      const res = await fetch(`/api/sessions/${projectId}`);
-      const data = await res.json();
-      setProjectSessions(prev => ({ ...prev, [projectId]: data }));
+    
+    if (isExpanded) {
+      setExpandedProjects(prev => ({ ...prev, [projectId]: false }));
+    } else {
+      await expandProject(activeCli, projectId);
     }
   }
 
+  // Handle session selection from UI (Updates URL)
+  const handleSessionSelect = (project_id: string, id: string) => {
+    setSelectedSession({ cli: activeCli, project_id, id });
+    const newPath = `/${activeCli}/${id}`;
+    if (window.location.pathname !== newPath) {
+      window.history.pushState(null, '', newPath);
+    }
+  };
+
+  // Fetch conversation when selection changes
   useEffect(() => {
     if (selectedSession) {
-      fetch(`/api/session/${selectedSession.project_id}/${selectedSession.id}`)
+      fetch(`/api/${selectedSession.cli}/session/${selectedSession.project_id}/${selectedSession.id}`)
         .then(res => res.text())
         .then(data => setConversation(data))
     }
@@ -92,7 +252,18 @@ function App() {
 
   const exportMarkdown = () => {
     if (!selectedSession) return;
-    const md = messages.map(m => `### ${m.role === 'user' ? 'You' : 'Claude'}\n\n${m.thinking ? `> Thinking: ${m.thinking}\n\n` : ''}${m.content}`).join('\n\n');
+    const md = messages.map(m => {
+      const header = `### ${m.role === 'user' ? 'User' : (selectedSession.cli === 'opencode' ? 'Opencode' : 'Claude')}\n\n`;
+      const content = m.content.map(block => {
+        if (block.type === 'text') return block.text.trim();
+        if (block.type === 'thinking') return `> Thinking: ${block.thinking.trim()}`;
+        if (block.type === 'tool_use') return `#### Tool Use: ${block.name}\n\`\`\`json\n${JSON.stringify(block.input, null, 2)}\n\`\`\``;
+        if (block.type === 'tool_result') return `#### Tool Result: ${block.tool_use_id}\n\`\`\`\n${(typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2)).trim()}\n\`\`\``;
+        return '';
+      }).filter(b => b !== '').join('\n\n');
+      return header + content;
+    }).join('\n\n---\n\n');
+    
     const blob = new Blob([md], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -101,17 +272,112 @@ function App() {
     a.click();
   }
 
+  const ThinkingWidget = ({ thinking }: { thinking: string }) => {
+    const [isExpanded, setIsExpanded] = useState(false);
+    return (
+      <div className="rounded-lg border border-outline-variant bg-surface-container-low/30 overflow-hidden mb-4">
+        <button 
+          onClick={() => setIsExpanded(!isExpanded)} 
+          className="w-full px-4 py-2 flex items-center justify-between hover:bg-surface-container-low transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Bot className="h-4 w-4 text-outline" />
+              <Sparkles className="h-2.5 w-2.5 text-outline absolute -top-1 -right-1" />
+            </div>
+            <span className="text-xs font-medium text-outline italic">
+              Thinking...
+            </span>
+          </div>
+          {isExpanded ? <ChevronDown className="h-4 w-4 text-outline" /> : <ChevronRight className="h-4 w-4 text-outline" />}
+        </button>
+        {isExpanded && (
+          <div className="px-4 pb-4 pt-2 border-t border-outline-variant">
+            <pre className="text-[11px] font-mono text-outline whitespace-pre-wrap italic">
+              {thinking.trim()}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderContent = (content: ContentBlock[]) => {
+    return content.map((block, idx) => {
+      if (block.type === 'text') {
+        if (!block.text.trim()) return null;
+        return (
+          <div key={idx} className="prose prose-slate max-w-none font-reader-body text-reader-body leading-relaxed text-on-surface mb-4">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.text}</ReactMarkdown>
+          </div>
+        );
+      }
+      
+      if (block.type === 'thinking') {
+        return <ThinkingWidget key={idx} thinking={block.thinking} />;
+      }
+      
+      if (block.type === 'tool_use') {
+        return (
+          <div key={idx} className="rounded-lg border border-primary/20 bg-primary/5 p-3 mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Wrench className="h-4 w-4 text-primary" />
+              <span className="text-xs font-semibold uppercase tracking-wider text-primary">Tool Use: {block.name}</span>
+            </div>
+            <pre className="text-[11px] font-mono bg-white/50 p-2 rounded border border-primary/10 overflow-x-auto">
+              {JSON.stringify(block.input, null, 2)}
+            </pre>
+          </div>
+        );
+      }
+      
+      if (block.type === 'tool_result') {
+        const isError = block.is_error;
+        const resultText = typeof block.content === 'string' 
+          ? block.content 
+          : (block.content?.text || JSON.stringify(block.content, null, 2));
+        
+        if (typeof resultText === 'string' && !resultText.trim()) return null;
+          
+        return (
+          <div key={idx} className={cn(
+            "rounded-lg border p-3 mb-4",
+            isError ? "border-error/20 bg-error/5" : "border-success/20 bg-success/5"
+          )}>
+            <div className="flex items-center gap-2 mb-2">
+              {isError ? <AlertCircle className="h-4 w-4 text-error" /> : <CheckCircle2 className="h-4 w-4 text-success" />}
+              <span className={cn(
+                "text-xs font-semibold uppercase tracking-wider",
+                isError ? "text-error" : "text-success"
+              )}>
+                Tool Result
+              </span>
+            </div>
+            <pre className="text-[11px] font-mono bg-white/50 p-2 rounded border border-outline-variant overflow-x-auto whitespace-pre-wrap">
+              {resultText}
+            </pre>
+          </div>
+        );
+      }
+      
+      return null;
+    });
+  };
+
   return (
     <div className="flex h-screen w-full bg-background">
       {/* Column 1: COI Switcher */}
       <aside className="w-16 border-r border-outline-variant bg-surface-container-low flex flex-col items-center py-4 gap-4">
         <div className="px-2.5"><img src="/logo.svg" alt="Archa Logo" className="w-8 h-8" /></div>
-        <button className="w-12 h-12 flex flex-col items-center justify-center text-primary bg-primary-container/10 border-l-2 border-primary">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" className="w-5 h-5 fill-current">
-            <path d="m19.6 66.5 19.7-11 .3-1-.3-.5h-1l-3.3-.2-11.2-.3L14 53l-9.5-.5-2.4-.5L0 49l.2-1.5 2-1.3 2.9.2 6.3.5 9.5.6 6.9.4L38 49.1h1.6l.2-.7-.5-.4-.4-.4L29 41l-10.6-7-5.6-4.1-3-2-1.5-2-.6-4.2 2.7-3 3.7.3.9.2 3.7 2.9 8 6.1L37 36l1.5 1.2.6-.4.1-.3-.7-1.1L33 25l-6-10.4-2.7-4.3-.7-2.6c-.3-1-.4-2-.4-3l3-4.2L28 0l4.2.6L33.8 2l2.6 6 4.1 9.3L47 29.9l2 3.8 1 3.4.3 1h.7v-.5l.5-7.2 1-8.7 1-11.2.3-3.2 1.6-3.8 3-2L61 2.6l2 2.9-.3 1.8-1.1 7.7L59 27.1l-1.5 8.2h.9l1-1.1 4.1-5.4 6.9-8.6 3-3.5L77 13l2.3-1.8h4.3l3.1 4.7-1.4 4.9-4.4 5.6-3.7 4.7-5.3 7.1-3.2 5.7.3.4h.7l12-2.6 6.4-1.1 7.6-1.3 3.5 1.6.4 1.6-1.4 3.4-8.2 2-9.6 2-14.3 3.3-.2.1.2.3 6.4.6 2.8.2h6.8l12.6 1 3.3 2 1.9 2.7-.3 2-5.1 2.6-6.8-1.6-16-3.8-5.4-1.3h-.8v.4l4.6 4.5 8.3 7.5L89 80.1l.5 2.4-1.3 2-1.4-.2-9.2-7-3.6-3-8-6.8h-.5v.7l1.8 2.7 9.8 14.7.5 4.5-.7 1.4-2.6 1-2.7-.6-5.8-8-6-9-4.7-8.2-.5.4-2.9 30.2-1.3 1.5-3 1.2-2.5-2-1.4-3 1.4-6.2 1.6-8 1.3-6.4 1.2-7.9.7-2.6v-.2H49L43 72l-9 12.3-7.2 7.6-1.7.7-3-1.5.3-2.8L24 86l10-12.8 6-7.9 4-4.6-.1-.5h-.3L17.2 77.4l-4.7.6-2-2 .2-3 1-1 8-5.5Z"></path>
-          </svg>
+        
+        <button 
+          onClick={() => setActiveCli('claude')}
+          className={`w-12 h-12 flex flex-col items-center justify-center transition-colors ${activeCli === 'claude' ? 'text-primary bg-primary-container/10 border-l-2 border-primary' : 'text-on-surface-variant hover:bg-surface-container border-l-2 border-transparent'}`}
+        >
+          <ClaudeIcon />
           <span className="text-[10px] mt-1">Claude</span>
         </button>
+
       </aside>
 
       {/* Column 2: Projects & Sessions */}
@@ -135,7 +401,7 @@ function App() {
               {expandedProjects[project.id] && projectSessions[project.id]?.map(session => (
                 <button
                   key={session.id}
-                  onClick={() => setSelectedSession({ project_id: project.id, id: session.id })}
+                  onClick={() => handleSessionSelect(project.id, session.id)}
                   className={`w-full pl-8 pr-2 py-1.5 text-left text-xs truncate transition-colors ${selectedSession?.id === session.id ? 'bg-primary-container/10 text-primary border-r-2 border-primary' : 'text-on-surface-variant hover:bg-surface-container'}`}
                 >
                   {session.title}
@@ -170,30 +436,42 @@ function App() {
         <div className="flex-1 overflow-y-auto custom-scrollbar p-8">
           <div className="max-w-reader-max-width mx-auto pb-24">
             {selectedSession ? (
-              messages.map((m, i) => (
-                <div key={i} className={`mb-12 ${m.role === 'user' ? '' : ''}`}>
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] ${m.role === 'user' ? 'bg-surface-container-highest text-outline' : 'bg-primary text-white'}`}>
-                      {m.role === 'user' ? 'U' : (
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" className="w-4 h-4 fill-current">
-                          <path d="m19.6 66.5 19.7-11 .3-1-.3-.5h-1l-3.3-.2-11.2-.3L14 53l-9.5-.5-2.4-.5L0 49l.2-1.5 2-1.3 2.9.2 6.3.5 9.5.6 6.9.4L38 49.1h1.6l.2-.7-.5-.4-.4-.4L29 41l-10.6-7-5.6-4.1-3-2-1.5-2-.6-4.2 2.7-3 3.7.3.9.2 3.7 2.9 8 6.1L37 36l1.5 1.2.6-.4.1-.3-.7-1.1L33 25l-6-10.4-2.7-4.3-.7-2.6c-.3-1-.4-2-.4-3l3-4.2L28 0l4.2.6L33.8 2l2.6 6 4.1 9.3L47 29.9l2 3.8 1 3.4.3 1h.7v-.5l.5-7.2 1-8.7 1-11.2.3-3.2 1.6-3.8 3-2L61 2.6l2 2.9-.3 1.8-1.1 7.7L59 27.1l-1.5 8.2h.9l1-1.1 4.1-5.4 6.9-8.6 3-3.5L77 13l2.3-1.8h4.3l3.1 4.7-1.4 4.9-4.4 5.6-3.7 4.7-5.3 7.1-3.2 5.7.3.4h.7l12-2.6 6.4-1.1 7.6-1.3 3.5 1.6.4 1.6-1.4 3.4-8.2 2-9.6 2-14.3 3.3-.2.1.2.3 6.4.6 2.8.2h6.8l12.6 1 3.3 2 1.9 2.7-.3 2-5.1 2.6-6.8-1.6-16-3.8-5.4-1.3h-.8v.4l4.6 4.5 8.3 7.5L89 80.1l.5 2.4-1.3 2-1.4-.2-9.2-7-3.6-3-8-6.8h-.5v.7l1.8 2.7 9.8 14.7.5 4.5-.7 1.4-2.6 1-2.7-.6-5.8-8-6-9-4.7-8.2-.5.4-2.9 30.2-1.3 1.5-3 1.2-2.5-2-1.4-3 1.4-6.2 1.6-8 1.3-6.4 1.2-7.9.7-2.6v-.2H49L43 72l-9 12.3-7.2 7.6-1.7.7-3-1.5.3-2.8L24 86l10-12.8 6-7.9 4-4.6-.1-.5h-.3L17.2 77.4l-4.7.6-2-2 .2-3 1-1 8-5.5Z"></path>
-                        </svg>
-                      )}
+              (() => {
+                const renderedMessages = messages.map((m, i) => {
+                  const renderedBlocks = renderContent(m.content);
+                  if (renderedBlocks.every(block => block === null)) return null;
+
+                  return (
+                    <div key={i} className={`mb-12 ${m.role === 'user' ? '' : ''}`}>
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] ${m.role === 'user' ? 'bg-surface-container-highest text-outline' : 'bg-primary text-white'}`}>
+                          {m.role === 'user' ? 'U' : (
+                            selectedSession.cli === 'opencode' ? <OpencodeIcon /> : <ClaudeIcon />
+                          )}
+                        </div>
+                        <span className="font-meta-label text-[10px] text-outline uppercase">
+                          {m.role === 'user' ? 'User' : (selectedSession.cli === 'opencode' ? 'Opencode' : 'Claude')} • {new Date(m.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <div className={cn(
+                        "max-w-none",
+                        m.role === 'user' ? "italic" : ""
+                      )}>
+                        {renderedBlocks}
+                      </div>
                     </div>
-                    <span className="font-meta-label text-[10px] text-outline uppercase">
-                      {m.role === 'user' ? 'You' : 'Claude'} • {new Date(m.timestamp).toLocaleTimeString()}
-                    </span>
+                  );
+                }).filter(m => m !== null);
+
+                return renderedMessages.length > 0 ? (
+                  renderedMessages
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-outline py-20">
+                    <span className="material-symbols-outlined text-6xl mb-4">hourglass_empty</span>
+                    <p>This session is empty.</p>
                   </div>
-                  {m.thinking && (
-                    <div className="text-xs text-outline italic border-l-2 border-outline-variant pl-4 mb-4 bg-surface-container-low/50 py-2 rounded-r">
-                      {m.thinking}
-                    </div>
-                  )}
-                  <div className={`prose prose-slate max-w-none font-reader-body text-reader-body leading-relaxed text-on-surface ${m.role === 'user' ? 'italic' : ''}`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                  </div>
-                </div>
-              ))
+                );
+              })()
             ) : (
               <div className="flex flex-col items-center justify-center h-full text-outline py-20">
                 <span className="material-symbols-outlined text-6xl mb-4">chat_bubble_outline</span>
@@ -204,7 +482,7 @@ function App() {
                     {recentSessions.map(s => (
                       <button 
                         key={s.id}
-                        onClick={() => setSelectedSession({ project_id: s.project_id, id: s.id })}
+                        onClick={() => handleSessionSelect(s.project_id, s.id)}
                         className="w-full p-4 mb-2 bg-surface-container-lowest border border-outline-variant rounded-lg hover:border-primary transition-colors text-left"
                       >
                         <div className="text-sm font-medium text-on-surface mb-1">{s.title}</div>
@@ -218,7 +496,7 @@ function App() {
           </div>
         </div>
         <div className="p-4 border-t border-outline-variant bg-surface-container-low text-center">
-          <p className="text-[10px] text-outline uppercase tracking-wider">Archa v0.1.1 • CLI Session Chronicle</p>
+          <p className="text-[10px] text-outline uppercase tracking-wider">Archa v0.1.2 • CLI Session Chronicle</p>
         </div>
       </section>
     </div>

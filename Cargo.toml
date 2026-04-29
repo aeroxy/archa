@@ -1,6 +1,6 @@
 [package]
 name = "archa"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Local-first Agent session reader and explorer with an embedded web UI"
 authors = ["Aero <aero.windwalker@gmail.com>"]

@@ -1,13 +1,13 @@
 class Archa < Formula
   desc "Local-first Agent session reader and explorer with an embedded web UI"
   homepage "https://github.com/aeroxy/archa"
-  version "0.1.1"
+  version "0.1.2"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/aeroxy/archa/releases/download/#{version}/archa_macos_arm64.zip"
-      sha256 "eb517d7efbfa42f431e09e2a2dbfbb3250ecdca9ef498c5c7973ea0ab53006b2"
+      sha256 "955dc56a050ef7aca80a1495056fc6d168e4df84b0ebd0bf273866172815f440"
     end
   end
 

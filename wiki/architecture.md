@@ -33,5 +33,41 @@ The frontend is a modern React application built with **Vite** and **Tailwind CS
 - **Column 2 (Explorer)**: A hierarchical view of projects and their sessions.
 - **Column 3 (Reader)**: A Markdown-rendered view of the selected conversation.
 
+### Message Data Model
+
+Messages are represented as a `ContentBlock[]` array rather than a flat string. Each block has a `type` field:
+
+| Type | Description |
+|------|-------------|
+| `text` | Plain assistant or user text. |
+| `thinking` | Claude's internal reasoning, rendered in a collapsible `ThinkingWidget`. |
+| `tool_use` | A tool invocation (name + JSON input), styled with a primary/blue accent. |
+| `tool_result` | The tool's response, remapped back into the originating assistant message and styled green (success) or red (error). |
+
+`convertToMessages` in `App.tsx` parses raw `.jsonl` lines and produces this structure.
+
+### Streaming Chunk Merging
+
+Claude's streaming logs emit multiple partial JSON lines for a single logical message. Archa merges consecutive chunks by matching `message.id` (assistant turns) or `prompt_id` (user turns) so that each chat bubble is complete and non-fragmented. Empty messages (whitespace-only after merging) are suppressed entirely.
+
+### Tool Result Remapping
+
+`tool_result` blocks arrive in the `.jsonl` stream as separate `user`-role events. Archa's parser maps each result back to the assistant message that issued the matching `tool_use` call (by `tool_use_id`), keeping the call/result pair visually together in the Reader column.
+
 ### Markdown Rendering
 We use `react-markdown` with `remark-gfm` to handle technical content, tables, and task lists. The typography is carefully chosen to distinguish between UI elements (Sans-serif) and the reading experience (Serif).
+
+### Markdown Export
+
+`exportMarkdown` serializes the `ContentBlock[]` structure into clean Markdown. Speaker labels use "User" / "Assistant". Tool calls and results are formatted as fenced code blocks. Excessive blank lines are trimmed.
+
+## Backend Notes
+
+### Route Parameter Syntax
+Axum v0.8+ requires `{param}` syntax (not `:param`). The route for CLI asset passthrough was corrected from `/:cli` to `/{cli}` to prevent a startup panic.
+
+### CLI Flag Conflict
+The `--port` flag uses `-p`. The `--projects_path` flag was changed to `-d` to avoid the conflict.
+
+### Empty-Folder Filtering
+`list_projects` skips project directories that contain no `.jsonl` files. This prevents ghost entries from appearing in the Explorer (e.g., `.timelines` system folders or empty clones).
