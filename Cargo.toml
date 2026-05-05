@@ -1,6 +1,6 @@
 [package]
 name = "archa"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "Local-first Agent session reader and explorer with an embedded web UI"
 authors = ["Aero <aero.windwalker@gmail.com>"]
@@ -43,6 +43,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 home = "0.5"
+
+# OpenCode SQLite storage
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [build-dependencies]
 rust-embed = "8"

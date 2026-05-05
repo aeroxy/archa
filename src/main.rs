@@ -2,13 +2,17 @@ use axum::{routing::get, Router, extract::{Path, State}, response::{IntoResponse
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use rust_embed::Embed;
-use serde::Serialize;
-use std::fs;
-use std::path::{Path as StdPath, PathBuf};
+use std::path::PathBuf;
 use tokio::net::TcpListener;
-use std::time::SystemTime;
 use std::sync::Arc;
 use clap::Parser;
+
+mod model;
+mod claude;
+mod opencode;
+mod backend;
+
+use backend::{AppState, Backend};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -22,45 +26,19 @@ struct Args {
     projects_path: Option<PathBuf>,
 }
 
-#[derive(Clone)]
-struct AppState {
-    projects_path: Option<PathBuf>,
-}
-
 #[derive(Embed)]
 #[folder = "frontend/dist/"]
 struct Assets;
-
-#[derive(Serialize, Clone)]
-struct Project {
-    name: String,
-    id: String,
-    cwd: Option<String>,
-}
-
-#[derive(Serialize)]
-struct Session {
-    id: String,
-    project_id: String,
-    title: String,
-    timestamp: Option<String>,
-}
-
-#[derive(Serialize)]
-struct SessionInfo {
-    project_id: String,
-}
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
     tracing_subscriber::fmt::init();
 
-    let state = Arc::new(AppState {
-        projects_path: args.projects_path.clone(),
-    });
+    let state = Arc::new(AppState::new(args.projects_path.clone()));
 
     let app = Router::new()
+        .route("/api/_/backends", get(list_backends))
         .route("/api/{cli}/projects", get(list_projects))
         .route("/api/{cli}/sessions/{project_id}", get(list_sessions))
         .route("/api/{cli}/session/{project_id}/{session_id}", get(read_session))
@@ -90,207 +68,66 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
-fn get_cli_path(cli: &str, custom_path: &Option<PathBuf>) -> PathBuf {
-    if let Some(path) = custom_path {
-        return path.clone();
-    }
-    
-    match cli {
-        "opencode" => home::home_dir().unwrap().join(".config/opencode/projects"),
-        _ => home::home_dir().unwrap().join(".claude/projects"), // default to claude
-    }
+fn not_found() -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from("Not Found"))
+        .unwrap()
+}
+
+async fn list_backends(State(state): State<Arc<AppState>>) -> axum::Json<Vec<String>> {
+    axum::Json(state.backend_ids())
 }
 
 async fn list_projects(
     Path(cli): Path<String>,
     State(state): State<Arc<AppState>>,
-) -> axum::Json<Vec<Project>> {
-    let path = get_cli_path(&cli, &state.projects_path);
-    let mut projects = Vec::new();
-    
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Ok(id) = entry.file_name().into_string() {
-                    let mut cwd = None;
-                    let mut has_sessions = false;
-                    // Try to find the actual cwd from the first session file
-                    if let Ok(sessions) = fs::read_dir(entry.path()) {
-                        for session in sessions.flatten() {
-                            if session.path().extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                                has_sessions = true;
-                                if cwd.is_none() {
-                                    if let Some(found_cwd) = extract_cwd_from_file(&session.path()) {
-                                        cwd = Some(found_cwd);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !has_sessions {
-                        continue;
-                    }
-
-                    let name = cwd.as_ref()
-                        .and_then(|p| StdPath::new(p).file_name())
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| id.replace("-", "/"));
-
-                    projects.push(Project {
-                        id,
-                        name,
-                        cwd,
-                    });
-                }
-            }
-        }
-    }
-    
-    axum::Json(projects)
-}
-
-fn extract_cwd_from_file(path: &StdPath) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    for line in content.lines() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(cwd) = v.get("cwd").and_then(|c| c.as_str()) {
-                return Some(cwd.to_string());
-            }
-        }
-    }
-    None
+) -> Response {
+    let Some(backend) = Backend::from_cli(&cli, &state) else { return not_found() };
+    axum::Json(backend.list_projects()).into_response()
 }
 
 async fn list_sessions(
     Path((cli, project_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
-) -> axum::Json<Vec<Session>> {
-    let path = get_cli_path(&cli, &state.projects_path).join(&project_id);
-    let mut sessions = Vec::new();
-    
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let file_path = entry.path();
-            if file_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                let id = entry.file_name().to_string_lossy().into_owned();
-                let title = get_session_title(&file_path).unwrap_or_else(|| id.clone());
-                sessions.push(Session {
-                    id,
-                    project_id: project_id.clone(),
-                    title,
-                    timestamp: None,
-                });
-            }
-        }
-    }
-    
-    axum::Json(sessions)
+) -> Response {
+    let Some(backend) = Backend::from_cli(&cli, &state) else { return not_found() };
+    axum::Json(backend.list_sessions(&project_id)).into_response()
 }
 
 async fn recent_sessions(
     Path(cli): Path<String>,
     State(state): State<Arc<AppState>>,
-) -> axum::Json<Vec<Session>> {
-    let path = get_cli_path(&cli, &state.projects_path);
-    let mut all_sessions = Vec::new();
-
-    if let Ok(project_entries) = fs::read_dir(path) {
-        for project_entry in project_entries.flatten() {
-            if project_entry.path().is_dir() {
-                let project_id = project_entry.file_name().to_string_lossy().into_owned();
-                if let Ok(session_entries) = fs::read_dir(project_entry.path()) {
-                    for session_entry in session_entries.flatten() {
-                        let file_path = session_entry.path();
-                        if file_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                            let mtime = fs::metadata(&file_path).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-                            all_sessions.push((mtime, project_id.clone(), file_path));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    all_sessions.sort_by(|a, b| b.0.cmp(&a.0));
-    
-    let mut recent = Vec::new();
-    for (_mtime, project_id, file_path) in all_sessions.into_iter().take(10) {
-        let id = file_path.file_name().unwrap().to_string_lossy().into_owned();
-        let title = get_session_title(&file_path).unwrap_or_else(|| id.clone());
-        recent.push(Session {
-            id,
-            project_id,
-            title,
-            timestamp: None,
-        });
-    }
-
-    axum::Json(recent)
+) -> Response {
+    let Some(backend) = Backend::from_cli(&cli, &state) else { return not_found() };
+    axum::Json(backend.recent_sessions()).into_response()
 }
 
 async fn get_session_project(
     Path((cli, session_id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let path = get_cli_path(&cli, &state.projects_path);
-    let expected_filename = format!("{}", session_id);
-    
-    if let Ok(project_entries) = fs::read_dir(path) {
-        for project_entry in project_entries.flatten() {
-            if project_entry.path().is_dir() {
-                let project_id = project_entry.file_name().to_string_lossy().into_owned();
-                let possible_file = project_entry.path().join(&expected_filename);
-                if possible_file.exists() || project_entry.path().join(format!("{}.jsonl", session_id)).exists() {
-                    return axum::Json(SessionInfo { project_id }).into_response();
-                }
-            }
-        }
+    let Some(backend) = Backend::from_cli(&cli, &state) else { return not_found() };
+    match backend.find_session(&session_id) {
+        Some(info) => axum::Json(info).into_response(),
+        None => not_found(),
     }
-    
-    Response::builder().status(StatusCode::NOT_FOUND).body(Body::from("Not Found")).unwrap()
-}
-
-fn get_session_title(path: &std::path::Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    for line in content.lines() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(msg) = v.get("message") {
-                if let Some(content) = msg.get("content") {
-                    let text = if let Some(text) = content.as_str() {
-                        text.to_string()
-                    } else if let Some(arr) = content.as_array() {
-                        arr.iter().filter_map(|item| item.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join(" ")
-                    } else {
-                        continue;
-                    };
-                    
-                    if !text.is_empty() && !text.contains("<local-command-caveat>") {
-                         return Some(text.chars().take(80).collect());
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 async fn read_session(
     Path((cli, project_id, session_id)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let path = get_cli_path(&cli, &state.projects_path).join(&project_id).join(&session_id);
-    
-    match fs::read_to_string(path) {
-        Ok(content) => Response::new(Body::from(content)),
-        Err(_) => Response::builder().status(StatusCode::NOT_FOUND).body(Body::from("Not Found")).unwrap(),
+    let Some(backend) = Backend::from_cli(&cli, &state) else { return not_found() };
+    match backend.read_session(&project_id, &session_id) {
+        Some(content) => Response::new(Body::from(content)),
+        None => not_found(),
     }
 }
 
 async fn static_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
-    
+
     if path.is_empty() || path == "index.html" {
         return index_handler();
     }

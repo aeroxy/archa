@@ -1,16 +1,9 @@
-# Archa
-
-Archa is a lightweight, local-first agent session reader and explorer. It allows you to browse your agent conversation history through a beautiful, three-column academic interface and export sessions to Markdown.
-
-## Project Overview
-
-Archa aims to turn AI interactions into a searchable, readable, and preservable form of technical literature. It runs as a local web server that reads directly from Claude's internal session storage (`~/.claude/projects`).
-
 ## Architecture
 
-- **Rust backend** (axum + tokio): 
-  - Reads `~/.claude/projects` directly.
-  - Extracts project names from `cwd` metadata in `.jsonl` files for high accuracy.
+- **Rust backend** (axum + tokio):
+  - Reads two sources via a `Backend` enum: Claude (`~/.claude/projects/*.jsonl`) and OpenCode (`~/.local/share/opencode/opencode*.db`, SQLite).
+  - For OpenCode, synthesizes Claude-style JSONL on the fly so the frontend renderer stays source-agnostic.
+  - Extracts project names from `cwd` (Claude) or `project.worktree` (OpenCode) for high accuracy.
   - Serves a REST API for project/session discovery and content reading.
   - Embeds the frontend via `rust-embed` for a single-binary experience.
 - **React frontend** (Vite + TypeScript + Tailwind):
@@ -22,7 +15,11 @@ Archa aims to turn AI interactions into a searchable, readable, and preservable 
 
 ## Key Directories
 
-- `src/main.rs` — Unified entry point. Handles API routes, static asset serving, and dynamic port selection.
+- `src/main.rs` — Axum wiring and route handlers.
+- `src/backend.rs` — `Backend` enum dispatch + multi-DB discovery for OpenCode.
+- `src/claude.rs` — fs-based Claude reader.
+- `src/opencode.rs` — read-only SQLite reader + Claude-shape JSONL synthesizer.
+- `src/model.rs` — shared `Project` / `Session` / `SessionInfo` types.
 - `frontend/` — React application source.
   - `src/App.tsx` — Main application logic and three-column layout.
   - `tailwind.config.js` — Color and typography definitions matching `DESIGN.md`.
@@ -62,4 +59,5 @@ make run
 
 | Doc | Covers |
 |-----|--------|
-| [wiki/architecture.md](wiki/architecture.md) | Deep dive into how Archa reads Claude data, manages state, and renders tool calls. |
+| [wiki/architecture.md](wiki/architecture.md) | How Archa routes between Claude/OpenCode backends, parses sessions, and renders tool calls. |
+| [wiki/opencode.md](wiki/opencode.md) | OpenCode SQLite storage layout, JSONL synthesis mapping, multi-DB merging. |

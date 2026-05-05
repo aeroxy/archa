@@ -16,8 +16,9 @@
 
 ## Features
 
-- **Three-Column Layout**: Global COI switcher, Project Explorer, and high-precision Reader.
-- **Project Discovery**: Automatically maps `~/.claude/projects` and extracts true project paths.
+- **Multi-source**: Reads both **Claude Code** (`~/.claude/projects`) and **OpenCode** (`~/.local/share/opencode/*.db`) sessions.
+- **Three-Column Layout**: Backend switcher, Project Explorer, and high-precision Reader.
+- **Project Discovery**: Extracts true project paths from session metadata for accurate display names.
 - **Academic Typography**: Designed for focus with Inter (UI), Newsreader (Serif Body), and Space Grotesk (Code).
 - **Markdown Export**: Save any session as a clean Markdown file for your own records.
 - **Single Binary**: The React frontend is embedded directly into the Rust backend.
@@ -28,7 +29,8 @@
 ### Via Homebrew (macOS)
 
 ```bash
-brew install aeroxy/tap/archa
+brew tap aeroxy/archa https://github.com/aeroxy/archa.git
+brew install aeroxy/archa/archa
 ```
 
 ### From Source

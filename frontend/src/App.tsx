@@ -152,7 +152,8 @@ const convertToMessages = (jsonl: string): Message[] => {
 }
 
 function App() {
-  const [activeCli, setActiveCli] = useState<'claude' | 'opencode'>('claude');
+  const [activeCli, setActiveCli] = useState<string>('claude');
+  const [backends, setBackends] = useState<string[]>(['claude']);
   const [projects, setProjects] = useState<Project[]>([])
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({})
   const [projectSessions, setProjectSessions] = useState<Record<string, Session[]>>({})
@@ -168,31 +169,39 @@ function App() {
     setProjectSessions(prev => ({ ...prev, [projectId]: data }));
   };
 
+  // Discover available backends on mount
+  useEffect(() => {
+    fetch('/api/_/backends')
+      .then(res => res.json())
+      .then((ids: string[]) => {
+        if (Array.isArray(ids) && ids.length > 0) setBackends(ids);
+      })
+      .catch(() => {});
+  }, []);
+
   // Initial load / Browser navigation handler
   useEffect(() => {
     const handleLocationChange = async () => {
       const match = window.location.pathname.match(/^\/([^\/]+)\/([^\/]+)$/);
       if (match) {
-        const cliParam = match[1] as 'claude' | 'opencode';
+        const cliParam = match[1];
         const sessionId = match[2];
-        
-        if (cliParam === 'claude' || cliParam === 'opencode') {
-          setActiveCli(cliParam);
-          
-          try {
-            // Find which project this session belongs to
-            const infoRes = await fetch(`/api/${cliParam}/session-info/${sessionId}`);
-            if (infoRes.ok) {
-              const { project_id } = await infoRes.json();
-              setSelectedSession({ cli: cliParam, project_id, id: sessionId });
-              expandProject(cliParam, project_id);
-            } else {
-              setSelectedSession(null);
-            }
-          } catch (e) {
-            console.error('Failed to find session info', e);
+
+        setActiveCli(cliParam);
+
+        try {
+          // Find which project this session belongs to
+          const infoRes = await fetch(`/api/${cliParam}/session-info/${sessionId}`);
+          if (infoRes.ok) {
+            const { project_id } = await infoRes.json();
+            setSelectedSession({ cli: cliParam, project_id, id: sessionId });
+            expandProject(cliParam, project_id);
+          } else {
             setSelectedSession(null);
           }
+        } catch (e) {
+          console.error('Failed to find session info', e);
+          setSelectedSession(null);
         }
       } else {
         setSelectedSession(null);
@@ -253,7 +262,8 @@ function App() {
   const exportMarkdown = () => {
     if (!selectedSession) return;
     const md = messages.map(m => {
-      const header = `### ${m.role === 'user' ? 'User' : (selectedSession.cli === 'opencode' ? 'Opencode' : 'Claude')}\n\n`;
+      const cliLabel = selectedSession.cli.startsWith('opencode') ? 'Opencode' : 'Claude';
+      const header = `### ${m.role === 'user' ? 'User' : cliLabel}\n\n`;
       const content = m.content.map(block => {
         if (block.type === 'text') return block.text.trim();
         if (block.type === 'thinking') return `> Thinking: ${block.thinking.trim()}`;
@@ -307,8 +317,25 @@ function App() {
       if (block.type === 'text') {
         if (!block.text.trim()) return null;
         return (
-          <div key={idx} className="prose prose-slate max-w-none font-reader-body text-reader-body leading-relaxed text-on-surface mb-4">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.text}</ReactMarkdown>
+          <div key={idx} className="prose prose-slate max-w-none font-reader-body text-reader-body leading-relaxed text-on-surface mb-4 min-w-0 overflow-hidden">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                pre: ({ children, ...props }) => (
+                  <pre {...props} className="overflow-x-auto max-w-full">{children}</pre>
+                ),
+                code: ({ className, children, ...props }: any) => {
+                  const isBlock = /language-/.test(className || '');
+                  if (isBlock) {
+                    return <code {...props} className={`${className || ''} block whitespace-pre`}>{children}</code>;
+                  }
+                  return <code {...props} className={`${className || ''} break-words`}>{children}</code>;
+                },
+                table: ({ children, ...props }) => (
+                  <div className="overflow-x-auto max-w-full"><table {...props}>{children}</table></div>
+                ),
+              }}
+            >{block.text}</ReactMarkdown>
           </div>
         );
       }
@@ -370,13 +397,21 @@ function App() {
       <aside className="w-16 border-r border-outline-variant bg-surface-container-low flex flex-col items-center py-4 gap-4">
         <div className="px-2.5"><img src="/logo.svg" alt="Archa Logo" className="w-8 h-8" /></div>
         
-        <button 
-          onClick={() => setActiveCli('claude')}
-          className={`w-12 h-12 flex flex-col items-center justify-center transition-colors ${activeCli === 'claude' ? 'text-primary bg-primary-container/10 border-l-2 border-primary' : 'text-on-surface-variant hover:bg-surface-container border-l-2 border-transparent'}`}
-        >
-          <ClaudeIcon />
-          <span className="text-[10px] mt-1">Claude</span>
-        </button>
+        {backends.map(id => {
+          const isOpencode = id === 'opencode';
+          const label = isOpencode ? 'Opencode' : 'Claude';
+          return (
+            <button
+              key={id}
+              onClick={() => setActiveCli(id)}
+              title={id}
+              className={`w-12 h-12 flex flex-col items-center justify-center transition-colors ${activeCli === id ? 'text-primary bg-primary-container/10 border-l-2 border-primary' : 'text-on-surface-variant hover:bg-surface-container border-l-2 border-transparent'}`}
+            >
+              {isOpencode ? <OpencodeIcon /> : <ClaudeIcon />}
+              <span className="text-[10px] mt-1">{label}</span>
+            </button>
+          );
+        })}
 
       </aside>
 
@@ -433,8 +468,8 @@ function App() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-8">
-          <div className="max-w-reader-max-width mx-auto pb-24">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar p-8">
+          <div className="max-w-reader-max-width mx-auto pb-24 min-w-0">
             {selectedSession ? (
               (() => {
                 const renderedMessages = messages.map((m, i) => {
@@ -446,11 +481,13 @@ function App() {
                       <div className="flex items-center gap-3 mb-4">
                         <div className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-[10px] ${m.role === 'user' ? 'bg-surface-container-highest text-outline' : 'bg-primary text-white'}`}>
                           {m.role === 'user' ? 'U' : (
-                            selectedSession.cli === 'opencode' ? <OpencodeIcon /> : <ClaudeIcon />
+                            selectedSession.cli.startsWith('opencode')
+                              ? <OpencodeIcon className="w-3.5 h-3.5" />
+                              : <ClaudeIcon className="w-3.5 h-3.5" />
                           )}
                         </div>
                         <span className="font-meta-label text-[10px] text-outline uppercase">
-                          {m.role === 'user' ? 'User' : (selectedSession.cli === 'opencode' ? 'Opencode' : 'Claude')} • {new Date(m.timestamp).toLocaleTimeString()}
+                          {m.role === 'user' ? 'User' : (selectedSession.cli.startsWith('opencode') ? 'Opencode' : 'Claude')} • {new Date(m.timestamp).toLocaleTimeString()}
                         </span>
                       </div>
                       <div className={cn(
@@ -496,7 +533,7 @@ function App() {
           </div>
         </div>
         <div className="p-4 border-t border-outline-variant bg-surface-container-low text-center">
-          <p className="text-[10px] text-outline uppercase tracking-wider">Archa v0.1.2 • CLI Session Chronicle</p>
+          <p className="text-[10px] text-outline uppercase tracking-wider">Archa v0.2.0 • CLI Session Chronicle</p>
         </div>
       </section>
     </div>

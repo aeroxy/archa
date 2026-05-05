@@ -1,73 +1,90 @@
 # Architecture
 
-Archa is designed as a lightweight wrapper around the Claude session filesystem.
+Archa is a lightweight wrapper around local agent session storage. It reads two sources today: **Claude Code** (`.jsonl` files on disk) and **OpenCode** (SQLite databases). The frontend renders both through a single `ContentBlock` model.
 
-## Data Discovery
+## Data sources
 
-Claude Code and Claude Desktop store session data in `~/.claude/projects/`. Each project is a directory named with a slugified version of its original path. Inside these directories are `.jsonl` files, where each line represents a message or a system event.
+| CLI | Location | Format |
+|---|---|---|
+| `claude` | `~/.claude/projects/{project_id}/{session_id}.jsonl` | One JSONL line per message |
+| `opencode` | `~/.local/share/opencode/opencode*.db` | SQLite (`project`, `session`, `message`, `part` tables) |
 
-Archa performs the following steps to reconstruct the project list:
-1. Iterates over subdirectories in `~/.claude/projects/`.
-2. For each directory, it reads the first `.jsonl` file it finds.
-3. It extracts the `cwd` field from the JSON metadata.
-4. It uses the `basename` of the `cwd` as the project's display name, ensuring that names like `chrome-devtools-cli` are preserved exactly as they are on the filesystem.
+Each source is a `Backend` variant ([src/backend.rs](../src/backend.rs)); the routing fork from `cli` path segment to backend lives in `Backend::from_cli`. Adding a third source is a new enum variant + module — handlers and frontend code don't change.
+
+### Claude project discovery
+
+1. Iterate subdirectories of `~/.claude/projects/`.
+2. For each, read the first `.jsonl` and extract its `cwd` field.
+3. Use `basename(cwd)` as the project's display name (so e.g. `chrome-devtools-cli` is preserved instead of the slugified directory name).
+4. Skip directories with no `.jsonl` files (avoids ghost entries from `.timelines` system folders or empty clones).
+
+### OpenCode project discovery
+
+1. Glob `~/.local/share/opencode/opencode*.db` at startup; cache the list in `AppState` via `OnceLock`.
+2. For each DB, query `project` joined with `session` to find non-archived projects.
+3. Merge across DBs; dedupe by project id (first DB wins).
+
+See [opencode.md](opencode.md) for the SQLite schema, JSONL synthesis mapping, and multi-DB merging details.
 
 ## Backend (Rust)
 
-The backend is built with **Axum** and **Tokio**. It serves two primary purposes:
-1. **REST API**: Providing endpoints for project listing, session listing, and raw session data reading.
-2. **Static Asset Serving**: Using `rust-embed` to serve the React frontend directly from the binary.
+Built with **Axum** + **Tokio**. Modules:
 
-### Key Endpoints
-- `GET /api/projects`: Returns a list of all detected projects with their IDs and names.
-- `GET /api/sessions/{project_id}`: Returns all `.jsonl` session files for a specific project.
-- `GET /api/session/{project_id}/{session_id}`: Returns the raw content of a specific session file.
-- `GET /api/recent-sessions`: Returns the 10 most recently modified sessions across all projects.
+- [src/main.rs](../src/main.rs) — axum wiring and route handlers.
+- [src/backend.rs](../src/backend.rs) — `Backend` enum, `AppState`, multi-DB discovery.
+- [src/model.rs](../src/model.rs) — shared `Project` / `Session` / `SessionInfo` types.
+- [src/claude.rs](../src/claude.rs) — fs-based Claude reader.
+- [src/opencode.rs](../src/opencode.rs) — read-only SQLite reader and Claude-shape JSONL synthesizer.
+
+`rusqlite` is bundled, so the binary has no system SQLite dependency.
+
+### REST API
+
+```
+GET /api/_/backends                                → ["claude", "opencode"]
+GET /api/{cli}/projects                            → Vec<Project>
+GET /api/{cli}/sessions/{project_id}               → Vec<Session>
+GET /api/{cli}/session/{project_id}/{session_id}   → raw JSONL (text)
+GET /api/{cli}/recent-sessions                     → Vec<Session>
+GET /api/{cli}/session-info/{session_id}           → {project_id}
+```
+
+For OpenCode, `read_session` returns synthesized Claude-style JSONL — the frontend renderer is source-agnostic.
+
+Notes:
+- Axum v0.8+ requires `{param}` syntax (not `:param`).
+- The `--port` flag uses `-p`; `--projects-path` uses `-d` to avoid the conflict.
 
 ## Frontend (React)
 
-The frontend is a modern React application built with **Vite** and **Tailwind CSS**.
+Built with **Vite** + **Tailwind CSS**. The bundle is embedded in the Rust binary via `rust-embed`, so the production deploy is a single executable.
 
-### Three-Column Design
-- **Column 1 (Switcher)**: Allows switching between different "Contexts of Interaction" (currently focused on Claude).
-- **Column 2 (Explorer)**: A hierarchical view of projects and their sessions.
-- **Column 3 (Reader)**: A Markdown-rendered view of the selected conversation.
+### Three-column layout
 
-### Message Data Model
+- **Column 1 (Switcher)**: One pill per backend, dynamically populated from `/api/_/backends`.
+- **Column 2 (Explorer)**: Hierarchical view of projects and their sessions.
+- **Column 3 (Reader)**: Markdown-rendered conversation.
 
-Messages are represented as a `ContentBlock[]` array rather than a flat string. Each block has a `type` field:
+### Message data model
+
+Messages are `ContentBlock[]` rather than flat strings. Each block has a `type`:
 
 | Type | Description |
 |------|-------------|
 | `text` | Plain assistant or user text. |
-| `thinking` | Claude's internal reasoning, rendered in a collapsible `ThinkingWidget`. |
-| `tool_use` | A tool invocation (name + JSON input), styled with a primary/blue accent. |
-| `tool_result` | The tool's response, remapped back into the originating assistant message and styled green (success) or red (error). |
+| `thinking` | Internal reasoning, rendered in a collapsible `ThinkingWidget`. |
+| `tool_use` | A tool invocation (name + JSON input). |
+| `tool_result` | The tool's response, remapped back into the originating assistant message. |
 
-`convertToMessages` in `App.tsx` parses raw `.jsonl` lines and produces this structure.
+`convertToMessages` ([App.tsx:45-152](../frontend/src/App.tsx#L45-L152)) parses Claude-style JSONL into this structure. It handles two non-trivial cases:
 
-### Streaming Chunk Merging
+- **Streaming chunk merging**: streaming logs emit multiple partial JSON lines for one logical message; consecutive chunks with the same `message.id` (assistant) or `prompt_id` (user) are merged.
+- **Tool result remapping**: `tool_result` blocks arrive as separate `user`-role events. A `toolResultsMap` keyed by `tool_use_id` re-attaches each result to its originating assistant message so call/result pairs render together.
 
-Claude's streaming logs emit multiple partial JSON lines for a single logical message. Archa merges consecutive chunks by matching `message.id` (assistant turns) or `prompt_id` (user turns) so that each chat bubble is complete and non-fragmented. Empty messages (whitespace-only after merging) are suppressed entirely.
+### Markdown rendering
 
-### Tool Result Remapping
+`react-markdown` + `remark-gfm` for content. Custom component overrides for `<pre>`, `<code>`, and `<table>` keep wide content scrolling internally instead of pushing the reader column wide.
 
-`tool_result` blocks arrive in the `.jsonl` stream as separate `user`-role events. Archa's parser maps each result back to the assistant message that issued the matching `tool_use` call (by `tool_use_id`), keeping the call/result pair visually together in the Reader column.
+### Markdown export
 
-### Markdown Rendering
-We use `react-markdown` with `remark-gfm` to handle technical content, tables, and task lists. The typography is carefully chosen to distinguish between UI elements (Sans-serif) and the reading experience (Serif).
-
-### Markdown Export
-
-`exportMarkdown` serializes the `ContentBlock[]` structure into clean Markdown. Speaker labels use "User" / "Assistant". Tool calls and results are formatted as fenced code blocks. Excessive blank lines are trimmed.
-
-## Backend Notes
-
-### Route Parameter Syntax
-Axum v0.8+ requires `{param}` syntax (not `:param`). The route for CLI asset passthrough was corrected from `/:cli` to `/{cli}` to prevent a startup panic.
-
-### CLI Flag Conflict
-The `--port` flag uses `-p`. The `--projects_path` flag was changed to `-d` to avoid the conflict.
-
-### Empty-Folder Filtering
-`list_projects` skips project directories that contain no `.jsonl` files. This prevents ghost entries from appearing in the Explorer (e.g., `.timelines` system folders or empty clones).
+`exportMarkdown` serializes `ContentBlock[]` into clean Markdown — speaker labels are "User" / "Claude" / "Opencode" depending on the active backend, tool calls and results render as fenced code blocks.
